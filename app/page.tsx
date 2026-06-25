@@ -1,65 +1,154 @@
-import Image from "next/image";
+'use client';
+
+import { useRef, useState } from 'react';
+
+type Status = 'idle' | 'connecting' | 'connected' | 'error';
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+const STATUS_LABEL: Record<Status, string> = {
+  idle: 'Disconnected',
+  connecting: 'Connecting...',
+  connected: 'Live',
+  error: 'Connection failed',
+};
+
+const STATUS_COLOR: Record<Status, string> = {
+  idle: 'bg-zinc-600',
+  connecting: 'bg-yellow-500 animate-pulse',
+  connected: 'bg-green-500',
+  error: 'bg-red-500',
+};
 
 export default function Home() {
+  const [url, setUrl] = useState('');
+  const [status, setStatus] = useState<Status>('idle');
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+
+  function cleanup() {
+    wsRef.current?.close();
+    pcRef.current?.close();
+    wsRef.current = null;
+    pcRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }
+
+  function connect() {
+    if (!url.trim()) return;
+    cleanup();
+    setStatus('connecting');
+
+    const ws = new WebSocket(url.trim());
+    wsRef.current = ws;
+
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pcRef.current = pc;
+
+    pc.ontrack = (event) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = event.streams[0];
+        setStatus('connected');
+      }
+    };
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'candidate', data: candidate.toJSON() }));
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setStatus('idle');
+      }
+    };
+
+    ws.onmessage = async (event) => {
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === 'offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: 'answer', data: { type: answer.type, sdp: answer.sdp } }));
+      } else if (msg.type === 'candidate' && msg.data) {
+        await pc.addIceCandidate(new RTCIceCandidate(msg.data));
+      }
+    };
+
+    ws.onerror = () => setStatus('error');
+    ws.onclose = () => {
+      if (status !== 'connected') setStatus('idle');
+    };
+  }
+
+  function disconnect() {
+    cleanup();
+    setStatus('idle');
+  }
+
+  const isConnected = status === 'connected' || status === 'connecting';
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-6 p-6">
+      {/* Video */}
+      <div className="w-full max-w-5xl aspect-video bg-zinc-900 rounded-xl overflow-hidden relative flex items-center justify-center">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          className="w-full h-full object-contain"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+        {status !== 'connected' && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <p className="text-zinc-500 text-sm">
+              {status === 'connecting' ? 'Waiting for stream...' : 'No stream connected'}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Controls */}
+      <div className="w-full max-w-5xl flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <span className={`w-2 h-2 rounded-full ${STATUS_COLOR[status]}`} />
+          <span className="text-sm text-zinc-400">{STATUS_LABEL[status]}</span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && !isConnected && connect()}
+            placeholder="wss://ip:port"
+            disabled={isConnected}
+            className="flex-1 bg-zinc-900 border border-zinc-700 text-white text-sm rounded-lg px-4 py-2.5 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500 disabled:opacity-40"
+          />
+          {!isConnected ? (
+            <button
+              onClick={connect}
+              disabled={!url.trim()}
+              className="px-5 py-2.5 bg-white text-black text-sm font-medium rounded-lg hover:bg-zinc-200 transition-colors disabled:opacity-30"
+            >
+              Connect
+            </button>
+          ) : (
+            <button
+              onClick={disconnect}
+              className="px-5 py-2.5 bg-zinc-800 text-white text-sm font-medium rounded-lg hover:bg-zinc-700 transition-colors"
+            >
+              Disconnect
+            </button>
+          )}
         </div>
-      </main>
+      </div>
     </div>
   );
 }

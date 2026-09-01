@@ -1,154 +1,162 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-type Status = 'idle' | 'connecting' | 'connected' | 'error';
+import { StreamViewer } from '@/app/components/stream-viewer';
+import { API_URL } from '@/app/lib/config';
+import { fetchStreams, type StreamRow } from '@/app/lib/streams';
 
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-];
-
-const STATUS_LABEL: Record<Status, string> = {
-  idle: 'Disconnected',
-  connecting: 'Connecting...',
-  connected: 'Live',
-  error: 'Connection failed',
-};
-
-const STATUS_COLOR: Record<Status, string> = {
-  idle: 'bg-zinc-600',
-  connecting: 'bg-yellow-500 animate-pulse',
-  connected: 'bg-green-500',
-  error: 'bg-red-500',
-};
+const POLL_MS = 5000;
 
 export default function Home() {
-  const [url, setUrl] = useState('');
-  const [status, setStatus] = useState<Status>('idle');
+  const [streams, setStreams] = useState<StreamRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [watchingId, setWatchingId] = useState<number | null>(null);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-
-  function cleanup() {
-    wsRef.current?.close();
-    pcRef.current?.close();
-    wsRef.current = null;
-    pcRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }
-
-  function connect() {
-    if (!url.trim()) return;
-    cleanup();
-    setStatus('connecting');
-
-    const ws = new WebSocket(url.trim());
-    wsRef.current = ws;
-
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    pcRef.current = pc;
-
-    pc.ontrack = (event) => {
-      if (videoRef.current) {
-        videoRef.current.srcObject = event.streams[0];
-        setStatus('connected');
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const rows = await fetchStreams(signal);
+      setStreams(rows);
+      setError(null);
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        setError((err as Error).message);
       }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    const timer = setInterval(() => load(), POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
     };
+  }, [load]);
 
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'candidate', data: candidate.toJSON() }));
-      }
-    };
+  const online = streams.filter((s) => s.is_online);
+  const offline = streams.filter((s) => !s.is_online);
 
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        setStatus('idle');
-      }
-    };
-
-    ws.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
-
-      if (msg.type === 'offer') {
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type: 'answer', data: { type: answer.type, sdp: answer.sdp } }));
-      } else if (msg.type === 'candidate' && msg.data) {
-        await pc.addIceCandidate(new RTCIceCandidate(msg.data));
-      }
-    };
-
-    ws.onerror = () => setStatus('error');
-    ws.onclose = () => {
-      if (status !== 'connected') setStatus('idle');
-    };
-  }
-
-  function disconnect() {
-    cleanup();
-    setStatus('idle');
-  }
-
-  const isConnected = status === 'connected' || status === 'connecting';
+  // Derived: only keep the viewer open while that stream is still online.
+  const watching =
+    watchingId != null ? (online.find((s) => s.id === watchingId) ?? null) : null;
 
   return (
-    <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-6 p-6">
-      {/* Video */}
-      <div className="w-full max-w-5xl aspect-video bg-zinc-900 rounded-xl overflow-hidden relative flex items-center justify-center">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          className="w-full h-full object-contain"
+    <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-6 bg-black p-6 text-white">
+      <header className="flex items-baseline justify-between">
+        <h1 className="text-lg font-semibold">IXAS Live</h1>
+        <span className="text-xs text-zinc-500">
+          {online.length} online · refresh tiap {POLL_MS / 1000}s
+        </span>
+      </header>
+
+      {watching ? (
+        <StreamViewer
+          streamId={watching.id}
+          streamName={watching.name}
+          onClose={() => setWatchingId(null)}
         />
-        {status !== 'connected' && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <p className="text-zinc-500 text-sm">
-              {status === 'connecting' ? 'Waiting for stream...' : 'No stream connected'}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* Controls */}
-      <div className="w-full max-w-5xl flex flex-col gap-3">
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${STATUS_COLOR[status]}`} />
-          <span className="text-sm text-zinc-400">{STATUS_LABEL[status]}</span>
-        </div>
-
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && !isConnected && connect()}
-            placeholder="wss://ip:port"
-            disabled={isConnected}
-            className="flex-1 bg-zinc-900 border border-zinc-700 text-white text-sm rounded-lg px-4 py-2.5 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500 disabled:opacity-40"
-          />
-          {!isConnected ? (
-            <button
-              onClick={connect}
-              disabled={!url.trim()}
-              className="px-5 py-2.5 bg-white text-black text-sm font-medium rounded-lg hover:bg-zinc-200 transition-colors disabled:opacity-30"
-            >
-              Connect
-            </button>
-          ) : (
-            <button
-              onClick={disconnect}
-              className="px-5 py-2.5 bg-zinc-800 text-white text-sm font-medium rounded-lg hover:bg-zinc-700 transition-colors"
-            >
-              Disconnect
-            </button>
+      ) : (
+        <section className="flex flex-col gap-4">
+          {!API_URL && (
+            <Banner tone="error">
+              NEXT_PUBLIC_API_URL belum di-set di .env.local
+            </Banner>
           )}
-        </div>
+          {error && <Banner tone="error">{error}</Banner>}
+          {loading && streams.length === 0 && (
+            <p className="text-sm text-zinc-500">Memuat daftar stream…</p>
+          )}
+
+          {online.length > 0 && (
+            <div>
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Online
+              </h2>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {online.map((s) => (
+                  <StreamCard
+                    key={s.id}
+                    stream={s}
+                    onWatch={() => setWatchingId(s.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {offline.length > 0 && (
+            <div>
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Offline
+              </h2>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {offline.map((s) => (
+                  <StreamCard key={s.id} stream={s} onWatch={() => {}} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!loading && !error && streams.length === 0 && (
+            <p className="text-sm text-zinc-500">
+              Belum ada stream terdaftar. Buat lewat menu Streams di admin portal.
+            </p>
+          )}
+        </section>
+      )}
+    </main>
+  );
+}
+
+function StreamCard({
+  stream,
+  onWatch,
+}: {
+  stream: StreamRow;
+  onWatch: () => void;
+}) {
+  const online = stream.is_online;
+  return (
+    <button
+      onClick={onWatch}
+      disabled={!online}
+      className="flex flex-col items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-left transition-colors enabled:hover:border-zinc-600 disabled:opacity-40"
+    >
+      <div className="flex w-full items-center gap-2">
+        <span
+          className={`h-2 w-2 shrink-0 rounded-full ${
+            online ? 'bg-green-500' : 'bg-zinc-600'
+          }`}
+        />
+        <span className="truncate text-sm font-medium">{stream.name}</span>
       </div>
-    </div>
+      <span className="truncate text-xs text-zinc-500">
+        {stream.company_name ?? '-'}
+      </span>
+      <span className="text-xs text-zinc-600">
+        {online ? 'Klik untuk menonton' : 'Offline'}
+      </span>
+    </button>
+  );
+}
+
+function Banner({
+  tone,
+  children,
+}: {
+  tone: 'error';
+  children: React.ReactNode;
+}) {
+  const cls =
+    tone === 'error'
+      ? 'border-red-900 bg-red-950/50 text-red-300'
+      : 'border-zinc-800 bg-zinc-900 text-zinc-300';
+  return (
+    <div className={`rounded-lg border px-4 py-2 text-sm ${cls}`}>{children}</div>
   );
 }

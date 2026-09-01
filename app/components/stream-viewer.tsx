@@ -6,13 +6,13 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   API_URL,
-  ICE_SERVERS,
   NGROK_HEADERS,
   PUSHER_KEY,
   REVERB_HOST,
   REVERB_IS_SECURE,
   REVERB_PORT,
 } from '@/app/lib/config';
+import { fetchIceServers } from '@/app/lib/streams';
 
 type Status = 'connecting' | 'waiting' | 'live' | 'error';
 
@@ -40,6 +40,9 @@ export function StreamViewer({ streamId, streamName, onClose }: { streamId: numb
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
+    // Ambil sekali di awal; dipakai saat offer datang.
+    const icePromise = fetchIceServers();
+
     const pusher = new Pusher(PUSHER_KEY, {
       cluster: 'mt1',
       wsHost: REVERB_HOST,
@@ -82,7 +85,15 @@ export function StreamViewer({ streamId, streamName, onClose }: { streamId: numb
     channel.bind('client-offer', async ({ viewerId, data }: SignalPayload) => {
       if (disposed || viewerId !== myId) return;
 
-      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const iceServers = await icePromise;
+      if (disposed) return;
+      pc = new RTCPeerConnection({ iceServers });
+      const turn = iceServers.some((s) =>
+        (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u) =>
+          u.startsWith('turn'),
+        ),
+      );
+      console.log(`[viewer] pc created (${turn ? 'STUN+TURN' : 'STUN only'})`);
 
       pc.ontrack = (event) => {
         if (videoRef.current) {
@@ -93,6 +104,9 @@ export function StreamViewer({ streamId, streamName, onClose }: { streamId: numb
 
       pc.onicecandidate = ({ candidate }) => {
         if (candidate) {
+          console.log(
+            `[viewer] local candidate: ${candidate.type} ${candidate.protocol}`,
+          );
           channel.trigger('client-candidate', {
             viewerId: myId,
             data: candidate.toJSON(),
@@ -100,9 +114,17 @@ export function StreamViewer({ streamId, streamName, onClose }: { streamId: numb
         }
       };
 
+      pc.oniceconnectionstatechange = () => {
+        console.log(`[viewer] ICE -> ${pc?.iceConnectionState}`);
+      };
+
       pc.onconnectionstatechange = () => {
         if (!pc) return;
-        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        console.log(`[viewer] conn -> ${pc.connectionState}`);
+        if (
+          pc.connectionState === 'failed' ||
+          pc.connectionState === 'disconnected'
+        ) {
           setStatus('error');
         }
       };

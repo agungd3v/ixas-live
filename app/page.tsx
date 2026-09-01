@@ -30,6 +30,8 @@ export default function Home() {
 
   useEffect(() => {
     const controller = new AbortController();
+    // Fetch + poll. setState hanya terjadi setelah fetch selesai (async).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load(controller.signal);
     const timer = setInterval(() => load(), POLL_MS);
     return () => {
